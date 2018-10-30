@@ -219,8 +219,6 @@ def learnit(numgames, lam_w,lam_th, alpha, alpha1, alpha2):
             count += 1
         # The game epsiode has ended and we know the outcome of the game, and can find the terminal rewards
         print(count)
-        print(w1[1:5,1])
-        print(th1[1:5,1])
         reward = 1
         #update fyrir winner
         # these are basically the same updates as in the inner loop but for the final-after-states (sold and xold)        
