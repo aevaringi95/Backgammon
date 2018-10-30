@@ -14,10 +14,10 @@ from torch.autograd import Variable
 n = 29
 device = torch.device('cpu')
 # cuda will only create a significant speedup for large/deep networks and batched training
-# device = torch.device('cuda') 
+#device = torch.device('cuda') 
 # randomly initialized weights with zeros for the biases
-w1 = Variable(torch.randn(n*n,2*n, device = device, dtype=torch.float), requires_grad = True)
-b1 = Variable(torch.zeros((n*n,1), device = device, dtype=torch.float), requires_grad = True)
+w1 = Variable(torch.randn(n*n,n*n-1, device = device, dtype=torch.float), requires_grad = True)
+b1 = Variable(torch.zeros(n*n,1, device = device, dtype=torch.float), requires_grad = True)
 w2 = Variable(torch.randn(1,n*n, device = device, dtype=torch.float), requires_grad = True)
 b2 = Variable(torch.zeros((1,1), device = device, dtype=torch.float), requires_grad = True)
 
@@ -39,9 +39,14 @@ def flip_move(move):
     return move
 
 def ice_hot_encoding(board):
-    ice_hot = np.zeros( 2 * len(board) )
-    ice_hot[np.where(board == 1)[0] ] = 1
-    ice_hot[len(board) + np.where(board == -1)[0] ] = 1
+    ice_hot = np.zeros( 2 * (len(board)-1) * 15)
+    for i in range(1,len(board)):
+        k = board[i].astype(np.int64)
+        if(k > 0):
+            ice_hot[k-1 + (i-1)*30] = 1
+        elif(k < 0):
+            # prufa að sleppa 15 og hafa = -1
+            ice_hot[-k-1 + (i-1)*30 + 15] = 1
     return ice_hot
 
 def action(board_copy,dice,player,i):
@@ -61,7 +66,7 @@ def action(board_copy,dice,player,i):
     
     for board in possible_boards:
         # encode the board to create the input
-        x = Variable(torch.tensor(ice_hot_encoding(board), dtype = torch.float, device = device)).view(2 * n,1)
+        x = Variable(torch.tensor(ice_hot_encoding(board), dtype = torch.float, device = device)).view(2*(n-1)*15,1)
         # now do a forward pass to evaluate the board's after-state value
         h = torch.mm(w1,x) + b1 # matrix-multiply x with input weight w1 and add bias
         h_sigmoid = h.sigmoid() # squash this with a sigmoid function
@@ -96,7 +101,10 @@ def learnit(numgames, lam, alpha, alpha1, alpha2):
         while not BG.game_over(board) and not BG.check_for_error(board):
             dice = BG.roll_dice()
             
-            # if 
+            # state til að uppfæra fyrir sigurvegara
+            if(count > 1):
+                xolder = xold
+            
             for i in range(1+int(dice[0] == dice[1])):
                 board_copy = np.copy(board)
                 move = action(board_copy, dice, player, i)
@@ -107,7 +115,7 @@ def learnit(numgames, lam, alpha, alpha1, alpha2):
       
             if (count > 1):
                 # here we have player 2 updating the neural-network (2 layer feed forward with Sigmoid units)
-                x = Variable(torch.tensor(ice_hot_encoding(board_copy), dtype = torch.float, device = device)).view(2*n,1)
+                x = Variable(torch.tensor(ice_hot_encoding(board_copy), dtype = torch.float, device = device)).view(2*(n-1)*15,1)
                 # now do a forward pass to evaluate the new board's after-state value
                 h = torch.mm(w1,x) + b1 # matrix-multiply x with input weight w1 and add bias
                 h_sigmoid = h.sigmoid() # squash this with a sigmoid function
@@ -142,7 +150,8 @@ def learnit(numgames, lam, alpha, alpha1, alpha2):
                 # we need to keep track of the last board state visited by the players
             
             if(not BG.game_over(board)):
-                xold = Variable(torch.tensor(ice_hot_encoding(board_copy), dtype=torch.float, device = device)).view(2*n,1)
+                xold = Variable(torch.tensor(ice_hot_encoding(board_copy), dtype=torch.float, device = device)).view(2*(n-1)*15,1)
+                
             # swap players
             player = -player
             count += 1
@@ -213,7 +222,7 @@ lam = 0.4 # lambda parameter in TD(lam-bda)
 
 import time
 start = time.time()
-training_steps = 10
+training_steps = 1
 learnit(training_steps, lam, alpha, alpha1, alpha2)
 end = time.time()
 print(end - start)
