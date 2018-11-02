@@ -52,21 +52,24 @@ def ice_hot_encoding(board):
         if(k > 0):
             if(k > 5):
                 ice_hot[6 + (i-1)*14] = 1
+                ice_hot[(i-1)*14 + 7] = 1
             else:
                 ice_hot[k + (i-1)*14] = 1
-        
+                ice_hot[(i-1)*14 + 7] = 1
         # if it's a negative player
         elif(k < 0):
             if(k < -5):
                 ice_hot[6 + (i-1)*14 + 7] = 1
+                ice_hot[(i-1)*14] = 1
             else:
                 ice_hot[-k + (i-1)*14 + 7] = 1
+                ice_hot[(i-1)*14] = 1
         
         # if there is no player on said triangle.
         elif(k == 0):
             ice_hot[k + (i-1)*14] = 1
             ice_hot[np.abs(k) + (i-1)*14 + 7] = 1
-        
+    
     return ice_hot
 
 def action(board_copy,dice,player,i):
