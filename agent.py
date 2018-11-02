@@ -8,24 +8,25 @@ perceive the board as player 1
 import numpy as np
 import Backgammon as BG
 import torch 
+import flipped_agent
 from torch.autograd import Variable
 
 # Global variables
 n = 29
+nodes = 10
 device = torch.device('cpu')
 # cuda will only create a significant speedup for large/deep networks and batched training
 #device = torch.device('cuda') 
 # randomly initialized weights with zeros for the biases
-w1 = Variable(torch.randn(80,n*n-1, device = device, dtype=torch.float), requires_grad = True)
-b1 = Variable(torch.zeros(80,1, device = device, dtype=torch.float), requires_grad = True)
-w2 = Variable(torch.randn(1,80, device = device, dtype=torch.float), requires_grad = True)
+w1 = Variable(torch.randn(nodes,7*(n-1)*2, device = device, dtype=torch.float), requires_grad = True)
+b1 = Variable(torch.zeros(nodes,1, device = device, dtype=torch.float), requires_grad = True)
+w2 = Variable(torch.randn(1,nodes, device = device, dtype=torch.float), requires_grad = True)
 b2 = Variable(torch.zeros((1,1), device = device, dtype=torch.float), requires_grad = True)
 
-th1 = Variable(torch.randn(80,n*n-1, device = device, dtype=torch.float), requires_grad = True)
-th_b1 = Variable(torch.zeros(80,1, device = device, dtype=torch.float), requires_grad = True)
-th2 = Variable(torch.randn(1,80, device = device, dtype=torch.float), requires_grad = True)
+th1 = Variable(torch.randn(nodes,7*(n-1)*2, device = device, dtype=torch.float), requires_grad = True)
+th_b1 = Variable(torch.zeros(nodes,1, device = device, dtype=torch.float), requires_grad = True)
+th2 = Variable(torch.randn(1,nodes, device = device, dtype=torch.float), requires_grad = True)
 th_b2 = Variable(torch.zeros((1,1), device = device, dtype=torch.float), requires_grad = True)
-
 
 def flip_board(board_copy):
     #flips the game board and returns a new copy
@@ -45,7 +46,6 @@ def flip_move(move):
 
 def ice_hot_encoding(board):
     ice_hot = np.zeros( 2 * (len(board)-1) * 7)
-    print("bla")
     for i in range(1,len(board)):
         k = board[i].astype(np.int64)
         # if it´s a positive player.
@@ -86,7 +86,7 @@ def action(board_copy,dice,player,i):
     
     for board in possible_boards:
         # encode the board to create the input
-        x = Variable(torch.tensor(ice_hot_encoding(board), dtype = torch.float, device = device)).view(2*(n-1)*15,1)
+        x = Variable(torch.tensor(ice_hot_encoding(board), dtype = torch.float, device = device)).view(2*(n-1)*7,1)
         # now do a forward pass to evaluate the board's after-state value
         va[j] = feed_forward_th(x)
         j+=1
@@ -161,7 +161,8 @@ def learnit(numgames, lam_w,lam_th, alpha, alpha1, alpha2):
         Z_th_b1 = torch.zeros(th_b1.size(), device = device, dtype = torch.float)
         Z_th2 = torch.zeros(th2.size(), device = device, dtype = torch.float)
         Z_th_b2 = torch.zeros(th_b2.size(), device = device, dtype = torch.float)
-        
+        if games % 100 == 0:
+            print(games)
         count = 0
         while not BG.game_over(board) and not BG.check_for_error(board):
             dice = BG.roll_dice()
@@ -178,10 +179,10 @@ def learnit(numgames, lam_w,lam_th, alpha, alpha1, alpha2):
                 break
       
             if (count > 1):
-                # here we have player 2 updating the neural-network (2 layer feed forward with Sigmoid units)
-                x = Variable(torch.tensor(ice_hot_encoding(board), dtype = torch.float, device = device)).view(2*(n-1)*15,1)
+                # One-hot encoding of the board
+                x = Variable(torch.tensor(ice_hot_encoding(board), dtype = torch.float, device = device)).view(2*(n-1)*7,1)
                 
-                #Feed forward 
+                #Feed forward w-nn
                 target= feed_forward_w(x)
                 
                 #Feed forward old state
@@ -206,8 +207,8 @@ def learnit(numgames, lam_w,lam_th, alpha, alpha1, alpha2):
                 target_th = feed_forward_th(xolder)
                 
                 
-                
-                target_th.backward()
+                logTarget = torch.log(target_th)
+                logTarget.backward()
                 # update the eligibility traces using the gradients
                 Z_th2, Z_th_b2, Z_th1, Z_th_b1 = update_eligibility_th(gamma, lam_w, Z_th1, Z_th_b1, Z_th2, Z_th_b2,I)
                 # zero the gradients
@@ -225,7 +226,7 @@ def learnit(numgames, lam_w,lam_th, alpha, alpha1, alpha2):
             
             if(not BG.game_over(board)):
                 if (count < 2):
-                    xold = Variable(torch.tensor(ice_hot_encoding(board), dtype=torch.float, device = device)).view(2*(n-1)*15,1)
+                    xold = Variable(torch.tensor(ice_hot_encoding(board), dtype=torch.float, device = device)).view(2*(n-1)*7,1)
                 else:
                     xold=x
                 
@@ -233,7 +234,6 @@ def learnit(numgames, lam_w,lam_th, alpha, alpha1, alpha2):
             player = -player
             count += 1
         # The game epsiode has ended and we know the outcome of the game, and can find the terminal rewards
-        print(count)
         reward = 1
         #update fyrir winner
         # these are basically the same updates as in the inner loop but for the final-after-states (sold and xold)        
@@ -303,15 +303,73 @@ def learnit(numgames, lam_w,lam_th, alpha, alpha1, alpha2):
  
 
 
-alpha = 0.1 # step size for tabular learning
-alpha1 = 0.01 # step sizes using for the neural network (first layer)
-alpha2 = 0.01 # (second layer)
+def play_a_game_random(commentary = False):
+    board = BG.init_board() # initialize the board
+    player = np.random.randint(2)*2-1 # which player begins?
+    randomPlayer = -1
+    while not BG.game_over(board) and not BG.check_for_error(board):
+        if commentary: print("lets go player ",player)
+        
+        # roll dice
+        dice = BG.roll_dice()
+        if commentary: print("rolled dices:", dice)
+            
+        # make a move (2 moves if the same number appears on the dice)
+        for i in range(1+int(dice[0] == dice[1])):
+            board_copy = np.copy(board) 
+
+            if player == randomPlayer:
+                move = flipped_agent.action(board_copy,dice,player,i) 
+            else:
+                move = action(board_copy,dice,player,i)
+            
+            # update the board
+            if len(move) != 0:
+                for m in move:
+                    board = BG.update_board(board, m, player)
+            
+            # give status after every move:         
+            if commentary: 
+                print("move from player",player,":")
+                BG.pretty_print(board)
+                
+        # players take turns 
+        player = -player
+            
+    # return the winner
+    return -1*player
+
+
+
+alpha= 0.1
+alpha1 = 0.1 # step sizes using for the neural network (first layer)
+alpha2 = 0.1 # (second layer)
 lam_w = 0.4 # lambda parameter in TD(lam-bda)
 lam_th = 0.4
 
 import time
 start = time.time()
-training_steps = 200
+training_steps = 1000
 learnit(training_steps, lam_w,lam_th, alpha, alpha1, alpha2)
 end = time.time()
 print(end - start)
+
+
+start = time.time()
+wins_for_player_1 = 0
+loss_for_player_1 = 0
+competition_games = 100
+for j in range(competition_games):
+    winner = play_a_game_random(commentary = False)
+    if (winner == 1):
+        wins_for_player_1 += 1.0
+    else:
+        loss_for_player_1 += 1.0
+
+end = time.time()
+print(end - start)
+
+print(wins_for_player_1, loss_for_player_1)
+# lets also play one deterministic game:
+
+
