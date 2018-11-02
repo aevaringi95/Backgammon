@@ -44,14 +44,29 @@ def flip_move(move):
     return move
 
 def ice_hot_encoding(board):
-    ice_hot = np.zeros( 2 * (len(board)-1) * 15)
+    ice_hot = np.zeros( 2 * (len(board)-1) * 7)
+    print("bla")
     for i in range(1,len(board)):
         k = board[i].astype(np.int64)
+        # if it´s a positive player.
         if(k > 0):
-            ice_hot[k-1 + (i-1)*30] = 1
+            if(k > 5):
+                ice_hot[6 + (i-1)*14] = 1
+            else:
+                ice_hot[k + (i-1)*14] = 1
+        
+        # if it's a negative player
         elif(k < 0):
-            # prufa að sleppa 15 og hafa = -1
-            ice_hot[-k-1 + (i-1)*30 + 15] = 1
+            if(k < -5):
+                ice_hot[6 + (i-1)*14 + 7] = 1
+            else:
+                ice_hot[-k + (i-1)*14 + 7] = 1
+        
+        # if there is no player on said triangle.
+        elif(k == 0):
+            ice_hot[k + (i-1)*14] = 1
+            ice_hot[np.abs(k) + (i-1)*14 + 7] = 1
+        
     return ice_hot
 
 def action(board_copy,dice,player,i):
