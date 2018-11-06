@@ -10,13 +10,14 @@ import Backgammon as BG
 import torch 
 import flipped_agent
 from torch.autograd import Variable
+import time
 
 # Global variables
 n = 29
-nodes = 5000
-#device = torch.device('cpu')
+nodes = 80
+device = torch.device('cpu')
 # cuda will only create a significant speedup for large/deep networks and batched training
-device = torch.device('cuda') 
+#device = torch.device('cuda') 
 # randomly initialized weights with zeros for the biases
 w1 = Variable(torch.randn(nodes,7*(n-1)*2, device = device, dtype=torch.float), requires_grad = True)
 b1 = Variable(torch.zeros(nodes,1, device = device, dtype=torch.float), requires_grad = True)
@@ -72,7 +73,7 @@ def ice_hot_encoding(board):
     
     return ice_hot
 
-def action(board_copy,dice,player,i):
+def action(board_copy,dice,player,i, learning = False):
     # the champion to be
     # inputs are the board, the dice and which player is to move
     # outputs the chosen move accordingly to its policy
@@ -81,11 +82,14 @@ def action(board_copy,dice,player,i):
         
     possible_moves, possible_boards = BG.legal_moves(board_copy, dice, player = 1)
     na = len(possible_moves)
-    va = np.zeros(na)
+    va = Variable(torch.zeros(na, device = device, dtype=torch.float), requires_grad = False)
     j = 0
     # if there are no moves available
     if len(possible_moves) == 0: 
-        return [] 
+        if learning == True:
+            return [], torch.tensor([1],dtype=torch.float, device = device,requires_grad=True), torch.tensor([0], device = device)
+        else:    
+            return [] 
     
     for board in possible_boards:
         # encode the board to create the input
@@ -93,13 +97,19 @@ def action(board_copy,dice,player,i):
         # now do a forward pass to evaluate the board's after-state value
         va[j] = feed_forward_th(x)
         j+=1
-        
+    
+    va = va.softmax(dim = 0)
     # Virkar i lista ?
     #move = possible_moves[np.random.randint(len(possible_moves))]
-    move = possible_moves[np.random.choice(np.arange(0, na), p=va/np.sum(va))]
+    move_index = torch.multinomial(va, num_samples  = 1)
+    move_index = Variable(move_index, requires_grad=False)
+    move = possible_moves[move_index]
     if player == -1: 
         move = flip_move(move)
-
+    
+    if learning == True:
+        return move, va, move_index
+    
     return move
 
 # zero the gradients for the critic.
@@ -118,18 +128,18 @@ def zero_gradients_actor():
     
      
 # update the eligibility traces
-def update_eligibility_w(gamma, lam_w, zw1, zb1, zw2, zb2, delta):
-    zw2 = delta*(gamma * lam_w * zw2 + w2.grad.data)
-    zb2 = delta*(gamma * lam_w * zb2 + b2.grad.data)
-    zw1 = delta*(gamma * lam_w * zw1 + w1.grad.data)
-    zb1 = delta*(gamma * lam_w * zb1 + b1.grad.data)
+def update_eligibility_w(gamma, lam_w, zw1, zb1, zw2, zb2):
+    zw2 = gamma * lam_w * zw2 + w2.grad.data
+    zb2 = gamma * lam_w * zb2 + b2.grad.data
+    zw1 = gamma * lam_w * zw1 + w1.grad.data
+    zb1 = gamma * lam_w * zb1 + b1.grad.data
     return zw2, zb2, zw1, zb1
 
-def update_eligibility_th(gamma, lam_w, zw1, zb1, zw2, zb2,I, delta):
-    zw2 = delta*(gamma * lam_w * zw2 + I*th2.grad.data)
-    zb2 = delta*(gamma * lam_w * zb2 + I*th_b2.grad.data)
-    zw1 = delta*(gamma * lam_w * zw1 + I*th1.grad.data)
-    zb1 = delta*(gamma * lam_w * zb1 + I*th_b1.grad.data)
+def update_eligibility_th(gamma, lam_w, zw1, zb1, zw2, zb2,I):
+    zw2 = gamma * lam_w * zw2 + I*th2.grad.data
+    zb2 = gamma * lam_w * zb2 + I*th_b2.grad.data
+    zw1 = gamma * lam_w * zw1 + I*th1.grad.data
+    zb1 = gamma * lam_w * zb1 + I*th_b1.grad.data
     return zw2, zb2, zw1, zb1
 
 def feed_forward_w(x):
@@ -143,8 +153,7 @@ def feed_forward_th(x):
     h = torch.mm(th1,x) + th_b1 # matrix-multiply x with input weight w1 and add bias
     h_sigmoid = h.sigmoid() # squash this with a sigmoid function
     y = torch.mm(th2,h_sigmoid) + th_b2 # multiply with the output weights w2 and add bias
-    y_sigmoid = y.sigmoid() # squash the output
-    return y_sigmoid
+    return y
 
 def learnit(numgames, lam_w, lam_th, alpha, alpha1, alpha2):
     gamma = 1 # for completeness
@@ -172,11 +181,15 @@ def learnit(numgames, lam_w, lam_th, alpha, alpha1, alpha2):
             dice = BG.roll_dice()
             
             for i in range(1+int(dice[0] == dice[1])):
-                move = action(np.copy(board), dice, player, i)
+                move, va, index  = action(np.copy(board), dice, player, i, True)
+                
                 
                 if len(move) != 0:
                     for m in move:
                         board = BG.update_board(board, m, player)
+                #tvenna og vinnur i fyrri leik. BREAK
+                if BG.game_over(board):
+                    break
                         
             if BG.game_over(board):
                 break
@@ -200,34 +213,32 @@ def learnit(numgames, lam_w, lam_th, alpha, alpha1, alpha2):
                 old_target.backward()
                 # update the eligibility traces using the gradients
                 delta2 =  torch.tensor(delta2, dtype = torch.float, device = device)
-                Z_w2, Z_b2, Z_w1, Z_b1 = update_eligibility_w(gamma, lam_w, Z_w1, Z_b1, Z_w2, Z_b2, delta2)
+                Z_w2, Z_b2, Z_w1, Z_b1 = update_eligibility_w(gamma, lam_w, Z_w1, Z_b1, Z_w2, Z_b2)
                 # zero the gradients
-                
-                if count % 5 == 0:
-                    zero_gradients_critic() 
-                    # perform now the update for the weights
-                    w1.data = w1.data + alpha1 * Z_w1
-                    b1.data = b1.data + alpha1 * Z_b1
-                    w2.data = w2.data + alpha2 * Z_w2
-                    b2.data = b2.data + alpha2 * Z_b2
+            
+                zero_gradients_critic() 
+                # perform now the update for the weights
+                w1.data = w1.data + alpha1 * delta2 * Z_w1
+                b1.data = b1.data + alpha1 * delta2 * Z_b1
+                w2.data = w2.data + alpha2 * delta2 * Z_w2
+                b2.data = b2.data + alpha2 * delta2 * Z_b2
                 
                 #Update theta
-                target_th = feed_forward_th(xolder)
-                
-                
-                logTarget = torch.log(target_th)
-                logTarget.backward()
+                if len(move) != 0:
+                    target_th = va[index]
+                    logTarget = torch.log(target_th)
+                    logTarget.backward(retain_graph=True)
+                    
                 # update the eligibility traces using the gradients
-                Z_th2, Z_th_b2, Z_th1, Z_th_b1 = update_eligibility_th(gamma, lam_w, Z_th1, Z_th_b1, Z_th2, Z_th_b2,I, delta2)
+                Z_th2, Z_th_b2, Z_th1, Z_th_b1 = update_eligibility_th(gamma, lam_w, Z_th1, Z_th_b1, Z_th2, Z_th_b2,I)
                 # zero the gradients
-                
-                if count % 5 == 0: 
-                    zero_gradients_actor()    
-                    th1.data = th1.data + alpha1 * Z_th1
-                    th_b1.data = th_b1.data + alpha1 * Z_th_b1
-                    th2.data = th2.data + alpha2 * Z_th2
-                    th_b2.data = th_b2.data + alpha2 * Z_th_b2
-                
+             
+                zero_gradients_actor()    
+                th1.data = th1.data + alpha1 * delta2 * Z_th1
+                th_b1.data = th_b1.data + alpha1 * delta2 * Z_th_b1
+                th2.data = th2.data + alpha2 * delta2 * Z_th2
+                th_b2.data = th_b2.data + alpha2 * delta2 * Z_th_b2
+            
                 I = gamma*I
             
             if(count > 0):
@@ -238,7 +249,10 @@ def learnit(numgames, lam_w, lam_th, alpha, alpha1, alpha2):
                     xold = Variable(torch.tensor(ice_hot_encoding(board), dtype=torch.float, device = device)).view(2*(n-1)*7,1)
                 else:
                     xold = x
-                
+                    
+            vaold = va
+            indexold = index
+            
             if player == -1:
                 board = flip_board(np.copy(board))
             
@@ -257,29 +271,29 @@ def learnit(numgames, lam_w, lam_th, alpha, alpha1, alpha2):
         # using autograd and the contructed computational graph in pytorch compute all gradients
         win_target.backward()
         # update the eligibility traces
-        Z_w2, Z_b2, Z_w1, Z_b1 = update_eligibility_w(gamma, lam_w, Z_w1, Z_b1, Z_w2, Z_b2, delta2)
+        Z_w2, Z_b2, Z_w1, Z_b1 = update_eligibility_w(gamma, lam_w, Z_w1, Z_b1, Z_w2, Z_b2)
         # zero the gradients
         zero_gradients_critic()
         # perform now the update of weights
-        w1.data = w1.data + alpha1 * Z_w1
-        b1.data = b1.data + alpha1 * Z_b1
-        w2.data = w2.data + alpha2 * Z_w2
-        b2.data = b2.data + alpha2 * Z_b2
+        w1.data = w1.data + alpha1 * delta2 * Z_w1
+        b1.data = b1.data + alpha1 * delta2 * Z_b1
+        w2.data = w2.data + alpha2 * delta2 * Z_w2
+        b2.data = b2.data + alpha2 * delta2 * Z_b2
         
-                #Update theta
-        target_th = feed_forward_th(xold)
-        
+        # Update theta
+        target_th = va[index]
         logTarget = torch.log(target_th)
         logTarget.backward()
+        
         # update the eligibility traces using the gradients
-        Z_th2, Z_th_b2, Z_th1, Z_th_b1 = update_eligibility_th(gamma, lam_w, Z_th1, Z_th_b1, Z_th2, Z_th_b2,I, delta2)
+        Z_th2, Z_th_b2, Z_th1, Z_th_b1 = update_eligibility_th(gamma, lam_w, Z_th1, Z_th_b1, Z_th2, Z_th_b2,I)
         # zero the gradients
         zero_gradients_actor()
         
-        th1.data = th1.data + alpha1 * Z_th1
-        th_b1.data = th_b1.data + alpha1 * Z_th_b1
-        th2.data = th2.data + alpha2 * Z_th2
-        th_b2.data = th_b2.data + alpha2 * Z_th_b2
+        th1.data = th1.data + alpha1 * delta2 * Z_th1
+        th_b1.data = th_b1.data + alpha1 * delta2 * Z_th_b1
+        th2.data = th2.data + alpha2 * delta2 * Z_th2
+        th_b2.data = th_b2.data + alpha2 * delta2 * Z_th_b2
         
         # update fyrir lúser
         reward = -1
@@ -291,7 +305,7 @@ def learnit(numgames, lam_w, lam_th, alpha, alpha1, alpha2):
         # using autograd and the contructed computational graph in pytorch compute all gradients
         loser_target.backward()
         # update the eligibility traces
-        Z_w2, Z_b2, Z_w1, Z_b1 = update_eligibility_w(gamma, lam_w, Z_w1, Z_b1, Z_w2, Z_b2, delta2)
+        Z_w2, Z_b2, Z_w1, Z_b1 = update_eligibility_w(gamma, lam_w, Z_w1, Z_b1, Z_w2, Z_b2)
         # zero the gradients
         zero_gradients_critic()
         # perform now the update of weights
@@ -301,12 +315,12 @@ def learnit(numgames, lam_w, lam_th, alpha, alpha1, alpha2):
         b2.data = b2.data + alpha2 * delta2 * Z_b2
         
         #Update theta
-        target_th = feed_forward_th(x)
-        
+        target_th = vaold[indexold]
         logTarget = torch.log(target_th)
         logTarget.backward()
+        
         # update the eligibility traces using the gradients
-        Z_th2, Z_th_b2, Z_th1, Z_th_b1 = update_eligibility_th(gamma, lam_w, Z_th1, Z_th_b1, Z_th2, Z_th_b2,I, delta2)
+        Z_th2, Z_th_b2, Z_th1, Z_th_b1 = update_eligibility_th(gamma, lam_w, Z_th1, Z_th_b1, Z_th2, Z_th_b2,I)
         # zero the gradients
         zero_gradients_actor()
         
@@ -361,44 +375,25 @@ alpha2 = 0.1 # (second layer)
 lam_w = 0.9 # lambda parameter in TD(lam-bda)
 lam_th = 0.9
 
-start = time.time()
-wins_for_player_1 = 0
-loss_for_player_1 = 0
-competition_games = 100
-for j in range(competition_games):
-    winner = play_a_game_random(commentary = False)
-    if (winner == 1):
-        wins_for_player_1 += 1.0
-    else:
-        loss_for_player_1 += 1.0
-
-end = time.time()
-print(end - start)
-
-print(wins_for_player_1, loss_for_player_1)
-
-import time
-start = time.time()
-training_steps = 1000
-learnit(training_steps, lam_w,lam_th, alpha, alpha1, alpha2)
-end = time.time()
-print(end - start)
-
-
-start = time.time()
-wins_for_player_1 = 0
-loss_for_player_1 = 0
-competition_games = 100
-for j in range(competition_games):
-    winner = play_a_game_random(commentary = False)
-    if (winner == 1):
-        wins_for_player_1 += 1.0
-    else:
-        loss_for_player_1 += 1.0
-
-end = time.time()
-print(end - start)
-
-print(wins_for_player_1, loss_for_player_1)
-# lets also play one deterministic game:
-
+for i in range(0,10):
+    start = time.time()
+    wins_for_player_1 = 0
+    loss_for_player_1 = 0
+    competition_games = 200
+    for j in range(competition_games):
+        winner = play_a_game_random(commentary = False)
+        if (winner == 1):
+            wins_for_player_1 += 1.0
+        else:
+            loss_for_player_1 += 1.0
+    
+    end = time.time()
+    print(end - start)
+    print(wins_for_player_1, loss_for_player_1)
+    
+    start = time.time()
+    training_steps = 1000
+    learnit(training_steps, lam_w,lam_th, alpha, alpha1, alpha2)
+    end = time.time()
+    print(end - start)
+    
