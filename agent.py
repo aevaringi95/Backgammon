@@ -86,8 +86,14 @@ def action(board_copy,dice,player,i, learning = False):
     j = 0
     # if there are no moves available
     if len(possible_moves) == 0: 
+        x = Variable(torch.tensor(ice_hot_encoding(board_copy), dtype = torch.float, device = device)).view(2*(n-1)*7,1)
+        va_temp=feed_forward_th(x)
+        va_temp=va_temp.softmax(dim=0)
+        va = torch.tensor([va_temp],dtype=torch.float, device = device,requires_grad=True)
+        move_index = torch.tensor([0], device = device)
         if learning == True:
-            return [], torch.tensor([1],dtype=torch.float, device = device,requires_grad=True), torch.tensor([0], device = device)
+            #return [], torch.tensor([1],dtype=torch.float, device = device,requires_grad=True), torch.tensor([0], device = device)
+            return [],va,move_index
         else:    
             return [] 
     
@@ -97,9 +103,8 @@ def action(board_copy,dice,player,i, learning = False):
         # now do a forward pass to evaluate the board's after-state value
         va[j] = feed_forward_th(x)
         j+=1
-    
     va = va.softmax(dim = 0)
-    # Virkar i lista ?
+    va = torch.tensor(va,dtype=torch.float, device = device,requires_grad=True)
     #move = possible_moves[np.random.randint(len(possible_moves))]
     move_index = torch.multinomial(va, num_samples  = 1)
     move_index = Variable(move_index, requires_grad=False)
@@ -224,10 +229,10 @@ def learnit(numgames, lam_w, lam_th, alpha, alpha1, alpha2):
                 b2.data = b2.data + alpha2 * delta2 * Z_b2
                 
                 #Update theta
-                if len(move) != 0:
-                    target_th = va[index]
-                    logTarget = torch.log(target_th)
-                    logTarget.backward(retain_graph=True)
+                #if len(move) != 0:
+                target_th = va[index]
+                logTarget = torch.log(target_th)
+                logTarget.backward(retain_graph=True)
                     
                 # update the eligibility traces using the gradients
                 Z_th2, Z_th_b2, Z_th1, Z_th_b1 = update_eligibility_th(gamma, lam_w, Z_th1, Z_th_b1, Z_th2, Z_th_b2,I)
@@ -370,8 +375,8 @@ def play_a_game_random(commentary = False):
 
 
 alpha= 0.1
-alpha1 = 0.1 # step sizes using for the neural network (first layer)
-alpha2 = 0.1 # (second layer)
+alpha1 = 0.12 # step sizes using for the neural network (first layer)
+alpha2 = 0.12 # (second layer)
 lam_w = 0.9 # lambda parameter in TD(lam-bda)
 lam_th = 0.9
 
@@ -379,7 +384,7 @@ for i in range(0,10):
     start = time.time()
     wins_for_player_1 = 0
     loss_for_player_1 = 0
-    competition_games = 200
+    competition_games = 1
     for j in range(competition_games):
         winner = play_a_game_random(commentary = False)
         if (winner == 1):
@@ -392,7 +397,7 @@ for i in range(0,10):
     print(wins_for_player_1, loss_for_player_1)
     
     start = time.time()
-    training_steps = 1000
+    training_steps = 5000
     learnit(training_steps, lam_w,lam_th, alpha, alpha1, alpha2)
     end = time.time()
     print(end - start)
