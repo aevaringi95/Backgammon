@@ -72,6 +72,7 @@ output:
     if learning == true: move
     else: move, probability, index for the move in possible_moves
 """
+"""
 def action(board_copy, dice, player, i, learning = False):
     
     if player == -1: 
@@ -111,11 +112,65 @@ def action(board_copy, dice, player, i, learning = False):
     move = possible_moves[move_index]
     if player == -1: 
         move = flip_move(move)
-    
     if learning == True:
         return move, prob, move_index
     
     return move
+"""
+
+"""
+input: board, dice, player, i and learning
+output:
+    if learning == true: move
+    else: move, probability, index for the move in possible_moves
+"""
+def action(board_copy,dice,player,i, learning = False):
+    if player == -1: 
+        board_copy = flip_board(board_copy)
+    
+    # Get every possible move and board    
+    possible_moves, possible_boards = BG.legal_moves(board_copy, dice, player = 1)
+    na = len(possible_moves)
+    # stores the output of the NN
+    if na == 0:
+        values = Variable(torch.zeros((7*(n-1)*2), device = device, dtype=torch.float), requires_grad = False)
+    else:
+        values = Variable(torch.zeros((7*(n-1)*2,na), device = device, dtype=torch.float), requires_grad = False)
+    j = 0
+    # if there are no moves available
+    if len(possible_moves) == 0: 
+        x = Variable(torch.tensor(ice_hot_encoding(board_copy), dtype = torch.float, device = device)).view(2*(n-1)*7,1)
+        prob_temp = feed_forward_th(x)
+        prob_temp = prob_temp.softmax(dim=0)
+        prob_nomove = torch.tensor([prob_temp],dtype=torch.float, device = device,requires_grad=True)
+        move_index = torch.tensor([0], device = device)
+        if learning == True:
+            return [], prob_nomove, move_index
+        else:    
+            return []
+    
+    for board in possible_boards:
+        # encode the board to create the input for the NN
+        x = Variable(torch.tensor(ice_hot_encoding(board), dtype = torch.float, device = device)).view(2*(n-1)*7,1)
+        values[:,j] = x[:,0]
+        j+=1
+    # forward pass to evaluate all of the boards' after-state values using the NN    
+    prob = feed_forward_th(values)
+    # squash the after state values with softmax
+    prob = prob.softmax(dim = -1)
+    prob_temp = torch.tensor(prob[0,:],dtype=torch.float, device = device,requires_grad=True)
+    # select the move from a distribution
+    move_index = torch.multinomial(prob_temp, num_samples  = 1)
+    move_index = Variable(move_index, requires_grad=False)
+    move = possible_moves[move_index]
+    if player == -1: 
+        move = flip_move(move)
+    
+    if learning == True:
+        return move, prob_temp[move_index], move_index
+    
+    return move
+
 
 # zero the gradients for the critic, w.
 def zero_gradients_critic():
@@ -237,8 +292,7 @@ def learnit(numgames, lam_w, lam_th, alpha1, alpha2):
                 b2.data = b2.data + alpha2 * delta * Z_b2
                 
                 #Update theta
-                target_th = prob[index]
-                logTarget = torch.log(target_th)
+                logTarget = torch.log(prob)
                 logTarget.backward(retain_graph=True)
                     
                 # update the eligibility traces using the gradients
@@ -274,14 +328,10 @@ def learnit(numgames, lam_w, lam_th, alpha1, alpha2):
             # swap players
             player = -player
             count += 1
-            
-        """
-        ***********************************************************************************************
-        """
-            
-        # The game epsiode has ended and we know the outcome of the game, and can find the terminal rewards
+                        
+        # The game episode has ended and we know the outcome of the game, and can find the terminal rewards
         reward = 1
-        #update fyrir winner
+        # update for the winner
         # these are basically the same updates as in the inner loop but for the final-after-states (x and xold)        
         # and then for the neural network:
         win_target= feed_forward_w(xold)
@@ -301,8 +351,7 @@ def learnit(numgames, lam_w, lam_th, alpha1, alpha2):
         b2.data = b2.data + alpha2 * delta * Z_b2
         
         # Update theta
-        target_th = prob[index]
-        logTarget = torch.log(target_th)
+        logTarget = torch.log(prob)
         logTarget.backward()
         
         # update the eligibility traces using the gradients
@@ -335,8 +384,7 @@ def learnit(numgames, lam_w, lam_th, alpha1, alpha2):
         b2.data = b2.data + alpha2 * delta * Z_b2
         
         #Update theta
-        target_th = probold[indexold]
-        logTarget = torch.log(target_th)
+        logTarget = torch.log(probold)
         logTarget.backward()
         
         # update the eligibility traces using the gradients
@@ -350,7 +398,11 @@ def learnit(numgames, lam_w, lam_th, alpha1, alpha2):
         thetab2.data = thetab2.data + alpha2 * delta * Z_thetab2
  
 
-
+"""
+The NN playes one game vs a random player, 
+returns the winner.
+Used to test whether the NN is improving its game.
+"""
 def play_a_game_random(commentary = False):
     board = BG.init_board() # initialize the board
     player = np.random.randint(2)*2-1 # which player begins?
@@ -395,22 +447,25 @@ nodes = 80
 device = torch.device('cpu')
 # cuda will only create a significant speedup for large/deep networks and batched training
 #device = torch.device('cuda') 
-# randomly initialized weights with zeros for the biases
+# randomly initialized weights, with zeros for the biases, for the critic
 w1 = Variable(torch.randn(nodes,7*(n-1)*2, device = device, dtype=torch.float), requires_grad = True)
 b1 = Variable(torch.zeros(nodes,1, device = device, dtype=torch.float), requires_grad = True)
 w2 = Variable(torch.randn(1,nodes, device = device, dtype=torch.float), requires_grad = True)
 b2 = Variable(torch.zeros((1,1), device = device, dtype=torch.float), requires_grad = True)
 
+# randomly initialized weights, with zeros for the biases, for the actor
 theta_1 = Variable(torch.randn(nodes,7*(n-1)*2, device = device, dtype=torch.float), requires_grad = True)
 thetab1 = Variable(torch.zeros(nodes,1, device = device, dtype=torch.float), requires_grad = True)
 theta_2 = Variable(torch.randn(1,nodes, device = device, dtype=torch.float), requires_grad = True)
 thetab2 = Variable(torch.zeros((1,1), device = device, dtype=torch.float), requires_grad = True)
 
-alpha1 = 0.12 # step sizes using for the neural network (first layer)
-alpha2 = 0.12 # (second layer)
-lam_w = 0.9 # lambda parameter in TD(lam-bda)
-lam_th = 0.9
+alpha1 = 0.01 # step sizes using for the neural network (first layer)
+alpha2 = 0.01 # (second layer)
+lam_w = 0.4 # lambda parameter in TD(lam-bda)
+lam_th = 0.4
 
+# compete for "competition_games" vs a random player, 
+# then train for "training_steps" using self-play.
 for i in range(0,10):
     start = time.time()
     wins_for_player_1 = 0
