@@ -13,22 +13,6 @@ from torch.autograd import Variable
 import time
 from random import randrange
 
-# Global variables
-n = 29
-nodes = 80
-device = torch.device('cpu')
-# cuda will only create a significant speedup for large/deep networks and batched training
-#device = torch.device('cuda') 
-# randomly initialized weights with zeros for the biases
-w1 = Variable(torch.randn(nodes,7*(n-1)*2, device = device, dtype=torch.float), requires_grad = True)
-b1 = Variable(torch.zeros(nodes,1, device = device, dtype=torch.float), requires_grad = True)
-w2 = Variable(torch.randn(1,nodes, device = device, dtype=torch.float), requires_grad = True)
-b2 = Variable(torch.zeros((1,1), device = device, dtype=torch.float), requires_grad = True)
-
-th1 = Variable(torch.randn(nodes,7*(n-1)*2, device = device, dtype=torch.float), requires_grad = True)
-th_b1 = Variable(torch.zeros(nodes,1, device = device, dtype=torch.float), requires_grad = True)
-th2 = Variable(torch.randn(1,nodes, device = device, dtype=torch.float), requires_grad = True)
-th_b2 = Variable(torch.zeros((1,1), device = device, dtype=torch.float), requires_grad = True)
 
 def flip_board(board_copy):
     #flips the game board and returns a new copy
@@ -149,7 +133,7 @@ def feed_forward_th(x):
     y = torch.mm(th2,h_sigmoid) + th_b2 # multiply with the output weights w2 and add bias
     return y
 
-
+"""
 def TabularDynaQ(gamma, epsilon, alpha, n):
     nw = 6
     mw = 9
@@ -188,16 +172,21 @@ def TabularDynaQ(gamma, epsilon, alpha, n):
         if episode >= 50:
             forever = False # nothing is forever :)
     return Q, stepcount
+"""
 
-
-def learnitDyna(numgames, epsilon, lam_w, alpha, alpha1, alpha2, gamma, n):
-    A = []
+def learnitDyna(numgames, epsilon, lam_w, alpha, alpha1, alpha2, gamma, numthink):
+    A = np.zeros(4)
     for games in range(0, numgames):
         I = 1
         board = BG.init_board() # initialize the board
         player = np.random.randint(2)*2-1 # which player begins?
         count = 0
         delta2 = 0
+        # initilize all the eligibility traces for the NN for critic w
+        Z_w1 = torch.zeros(w1.size(), device = device, dtype = torch.float)
+        Z_b1 = torch.zeros(b1.size(), device = device, dtype = torch.float)
+        Z_w2 = torch.zeros(w2.size(), device = device, dtype = torch.float)
+        Z_b2 = torch.zeros(b2.size(), device = device, dtype = torch.float)
         
         #play a game
         while not BG.game_over(board) and not BG.check_for_error(board):
@@ -222,7 +211,8 @@ def learnitDyna(numgames, epsilon, lam_w, alpha, alpha1, alpha2, gamma, n):
                 
             if (count > 1):
                 # One-hot encoding of the board
-                x = Variable(torch.tensor(ice_hot_encoding(board), dtype = torch.float, device = device)).view(7*(n-1)*2,1)
+                x_temp = ice_hot_encoding(board)
+                x = Variable(torch.tensor(x_temp, dtype = torch.float, device = device)).view(7*(n-1)*2,1)
                 
                 #Feed forward w-nn
                 target= feed_forward_w(x)
@@ -242,20 +232,61 @@ def learnitDyna(numgames, epsilon, lam_w, alpha, alpha1, alpha2, gamma, n):
                 b1.data = b1.data + alpha1 * delta2 * Z_b1
                 w2.data = w2.data + alpha2 * delta2 * Z_w2
                 b2.data = b2.data + alpha2 * delta2 * Z_b2
-                # we need to keep track of the last board state visited by the players
                 
-                A.append(xolder, move, x, 0)
+                # append to the model, for the first time we create A, else we just stack on it. 
+                if count == 2 and games == 0:
+                    A = np.array([[x_tempolder], [move], [x_temp], 0])
+                else:
+                    add_to_model = np.array([[x_tempolder], [move], [x_temp], 0])
+                    A = np.vstack((A, add_to_model))
                 
+                
+                if count > 2:
+                    for thought in range(0,numthink):
+                        state_indx = np.random.choice(A.shape[0])
+                        state, move_temp, statenew, rewardtemp = A[state_indx]
+                        
+                        if statenew == 0:
+                            #Feed forward old state
+                            state = Variable(torch.tensor(state, dtype = torch.float, device = device)).view(7*(n-1)*2,1)
+                            old_target1 = feed_forward_w(state)
+                            delta2 = rewardtemp + 0 - old_target1.detach().cpu().numpy()
+                        else: 
+                            state = Variable(torch.tensor(state, dtype = torch.float, device = device)).view(7*(n-1)*2,1)
+                            statenew = Variable(torch.tensor(statenew, dtype = torch.float, device = device)).view(7*(n-1)*2,1)
+                            #Feed forward w-nn
+                            target1 = feed_forward_w(statenew)
+                            #Feed forward old state
+                            old_target1 = feed_forward_w(state)
+                            delta2 = 0 + gamma * target1.detach().cpu().numpy() - old_target1.detach().cpu().numpy() # this is the usual TD error
+                        
+                        # using autograd and the contructed computational graph in pytorch compute all gradients
+                        old_target1.backward()
+                        # zero the gradients
+                        zero_gradients_critic()
+                        # perform now the update for the weights
+                        delta2 =  torch.tensor(delta2, dtype = torch.float, device = device)
+                        w1.data = w1.data + alpha1 * delta2 * w1.grad.data
+                        b1.data = b1.data + alpha1 * delta2 * b1.grad.data
+                        w2.data = w2.data + alpha2 * delta2 * w2.grad.data
+                        b2.data = b2.data + alpha2 * delta2 * b2.grad.data
+                        
+                        
+                        
+                    
+            # we need to keep track of the last board state visited by the players
             if(count > 0):
                 xolder = xold
+                x_tempolder = x_tempold
             
             if(not BG.game_over(board)):
                 if (count < 2):
-                    xold = Variable(torch.tensor(ice_hot_encoding(board), dtype=torch.float, device = device)).view(7*(n-1)*2,1)
+                    x_tempold = ice_hot_encoding(board)
+                    xold = Variable(torch.tensor(x_tempold, dtype=torch.float, device = device)).view(7*(n-1)*2,1)
                 else:
-                    xold=x
-                
-            
+                    x_tempold = x_temp
+                    xold = x
+                    
             if player == -1:
                 board = flip_board(np.copy(board))
             # swap players
@@ -281,6 +312,9 @@ def learnitDyna(numgames, epsilon, lam_w, alpha, alpha1, alpha2, gamma, n):
         w2.data = w2.data + alpha2 * delta2 * Z_w2
         b2.data = b2.data + alpha2 * delta2 * Z_b2
         
+        add_to_model = np.array([[x_tempold], [move], 0, 1])
+        A = np.vstack((A, add_to_model))
+        print(A.shape)
         
         # update fyrir lúser
         reward = -1
@@ -300,6 +334,9 @@ def learnitDyna(numgames, epsilon, lam_w, alpha, alpha1, alpha2, gamma, n):
         b1.data = b1.data + alpha1 * delta2 * Z_b1
         w2.data = w2.data + alpha2 * delta2 * Z_w2
         b2.data = b2.data + alpha2 * delta2 * Z_b2
+        
+        add_to_model = np.array([[x_temp], [0], 0, -1])
+        A = np.vstack((A, add_to_model))
 
 
 def play_a_game_random(commentary = False):
@@ -320,7 +357,7 @@ def play_a_game_random(commentary = False):
             if player == randomPlayer:
                 move = flipped_agent.action(board_copy,dice,player,i) 
             else:
-                move = action(board_copy,dice,player,i)
+                move = action(board_copy, epsilon, dice, player, i)
             
             # update the board
             if len(move) != 0:
@@ -338,19 +375,36 @@ def play_a_game_random(commentary = False):
     # return the winner
     return -1*player
 
+# Global variables
+n = 29
+nodes = 80
+device = torch.device('cpu')
+# cuda will only create a significant speedup for large/deep networks and batched training
+#device = torch.device('cuda') 
+# randomly initialized weights with zeros for the biases
+w1 = Variable(torch.randn(nodes,7*(n-1)*2, device = device, dtype=torch.float), requires_grad = True)
+b1 = Variable(torch.zeros(nodes,1, device = device, dtype=torch.float), requires_grad = True)
+w2 = Variable(torch.randn(1,nodes, device = device, dtype=torch.float), requires_grad = True)
+b2 = Variable(torch.zeros((1,1), device = device, dtype=torch.float), requires_grad = True)
 
+th1 = Variable(torch.randn(nodes,7*(n-1)*2, device = device, dtype=torch.float), requires_grad = True)
+th_b1 = Variable(torch.zeros(nodes,1, device = device, dtype=torch.float), requires_grad = True)
+th2 = Variable(torch.randn(1,nodes, device = device, dtype=torch.float), requires_grad = True)
+th_b2 = Variable(torch.zeros((1,1), device = device, dtype=torch.float), requires_grad = True)
 
 alpha= 0.1
 alpha1 = 0.12 # step sizes using for the neural network (first layer)
 alpha2 = 0.12 # (second layer)
 lam_w = 0.9 # lambda parameter in TD(lam-bda)
 lam_th = 0.9
+epsilon = 0
+numberofthink = 10
 
 for i in range(0,10):
     start = time.time()
     wins_for_player_1 = 0
     loss_for_player_1 = 0
-    competition_games = 1
+    competition_games = 0
     for j in range(competition_games):
         winner = play_a_game_random(commentary = False)
         if (winner == 1):
@@ -363,7 +417,7 @@ for i in range(0,10):
     print(wins_for_player_1, loss_for_player_1)
     
     start = time.time()
-    training_steps = 1
-    learnit(training_steps, lam_w,lam_th, alpha, alpha1, alpha2)
+    training_steps = 100
+    learnitDyna(training_steps, epsilon, lam_w, lam_th, alpha, alpha1, alpha2, numberofthink)
     end = time.time()
     print(end - start)
