@@ -153,7 +153,6 @@ def action(board_copy,dice,player,i, learning = False):
     # select the move from a distribution
     X=Variable(torch.tensor(one_hot_boards, dtype = torch.float,device = device))
     h=feed_forward_th(X)
-    w=feed_forward_w(X)
     h_sigmoid=h.sigmoid()
     pi = torch.mm(theta,h_sigmoid).softmax(1)
     xtheta_mean = torch.sum(torch.mm(h_sigmoid,torch.diagflat(pi)),1)
