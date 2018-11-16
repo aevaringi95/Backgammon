@@ -171,12 +171,11 @@ def learnit(numgames,lam_w,lam_th,alpha_w, alpha_th):
                 board = flip_board(np.copy(board))
             if (count > 1):
                 if player == -1:
-                    board = flip_board(np.copy(board))
                     #One-hot encoding of the board
                     xflip = Variable(torch.tensor(ice_hot_encoding(board), dtype = torch.float, device = device)).view(7*(n-1)*2,1)
                     
                     #Feed forward w-nn for old and new
-                    target,h_sigmoidNew= feed_forward_w(xflip)
+                    target,_= feed_forward_w(xflip)
                     old_target,h_sigmoid = feed_forward_w(xflipold)
                     delta = 0 + gamma * target.detach().cpu().numpy() - old_target.detach().cpu().numpy() # this is the usual TD error
                     # using autograd and the contructed computational graph in pytorch compute all gradients
@@ -187,10 +186,10 @@ def learnit(numgames,lam_w,lam_th,alpha_w, alpha_th):
                     zero_gradients_critic()
                     # perform now the update for the weights
                     delta =  torch.tensor(delta, dtype = torch.float, device = device)
-                    w1.data = w1.data + alpha1 * delta * Z_w1_flip
-                    b1.data = b1.data + alpha1 * delta * Z_b1_flip
-                    w2.data = w2.data + alpha2 * delta * Z_w2_flip
-                    b2.data = b2.data + alpha2 * delta * Z_b2_flip
+                    w1.data = w1.data + alpha_w * delta * Z_w1_flip
+                    b1.data = b1.data + alpha_w * delta * Z_b1_flip
+                    w2.data = w2.data + alpha_w * delta * Z_w2_flip
+                    b2.data = b2.data + alpha_w * delta * Z_b2_flip
                     #Update theta
                     grad_ln_pi = h_sigmoid - xtheta
                     theta.data = theta.data + alpha_th*delta*grad_ln_pi.view(1,len(grad_ln_pi))
@@ -200,7 +199,7 @@ def learnit(numgames,lam_w,lam_th,alpha_w, alpha_th):
                     x = Variable(torch.tensor(ice_hot_encoding(board), dtype = torch.float, device = device)).view(7*(n-1)*2,1)
                     
                     #Feed forward w-nn for old and new
-                    target,h_sigmoidNew= feed_forward_w(x)
+                    target,_= feed_forward_w(x)
                     old_target,h_sigmoid = feed_forward_w(xold)
                     delta = 0 + gamma * target.detach().cpu().numpy() - old_target.detach().cpu().numpy() # this is the usual TD error
                     # using autograd and the contructed computational graph in pytorch compute all gradients
@@ -211,10 +210,10 @@ def learnit(numgames,lam_w,lam_th,alpha_w, alpha_th):
                     zero_gradients_critic()
                     # perform now the update for the weights
                     delta =  torch.tensor(delta, dtype = torch.float, device = device)
-                    w1.data = w1.data + alpha1 * delta * Z_w1
-                    b1.data = b1.data + alpha1 * delta * Z_b1
-                    w2.data = w2.data + alpha2 * delta * Z_w2
-                    b2.data = b2.data + alpha2 * delta * Z_b2
+                    w1.data = w1.data + alpha_w * delta * Z_w1
+                    b1.data = b1.data + alpha_w * delta * Z_b1
+                    w2.data = w2.data + alpha_w * delta * Z_w2
+                    b2.data = b2.data + alpha_w * delta * Z_b2
                     #Update theta
                     grad_ln_pi = h_sigmoid - xtheta
                     theta.data = theta.data + alpha_th*delta*grad_ln_pi.view(1,len(grad_ln_pi))
@@ -347,10 +346,10 @@ b2 = Variable(torch.zeros((1,1), device = device, dtype=torch.float), requires_g
 #randomly initialized weights, with zeros for the biases, for the actor
 theta = 0.01*torch.ones((1,nodes), device = device, dtype=torch.float)
 
-alpha_w = 0.0 # step sizes using for the neural network (first layer)
+alpha_w = 0.01 # step sizes using for the neural network (first layer)
 alpha_th = 0.01 # (second layer)
-lam_w = 0.9 # lambda parameter in TD(lam-bda)
-lam_th = 0.9
+lam_w = 0.7 # lambda parameter in TD(lam-bda)
+lam_th = 0.7
 
 # compete for "competition_games" vs a random player, 
 
@@ -359,7 +358,7 @@ for i in range(0,10):
     start = time.time()
     wins_for_player_1 = 0
     loss_for_player_1 = 0
-    competition_games = 1
+    competition_games = 500
     for j in range(competition_games):
         winner = play_a_game_random(commentary = False)
         if (winner == 1):
