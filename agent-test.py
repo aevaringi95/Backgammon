@@ -2,32 +2,18 @@
 # -*- coding: utf-8 -*-
 """
 The intelligent agent
-see flipped_agent for an example of how to flip the board in order to always
-perceive the board as player 1
 """
+import sys
 import numpy as np
+from random import randrange
 import Backgammon as BG
 import torch 
 import flipped_agent
 from torch.autograd import Variable
 import time
 
-# Global variables
-n = 29
-nodes = 80
-device = torch.device('cpu')
-# cuda will only create a significant speedup for large/deep networks and batched training
-#device = torch.device('cuda') 
-# randomly initialized weights with zeros for the biases
-w1 = Variable(torch.randn(nodes,7*(n-1)*2, device = device, dtype=torch.float), requires_grad = True)
-b1 = Variable(torch.zeros(nodes,1, device = device, dtype=torch.float), requires_grad = True)
-w2 = Variable(torch.randn(1,nodes, device = device, dtype=torch.float), requires_grad = True)
-b2 = Variable(torch.zeros((1,1), device = device, dtype=torch.float), requires_grad = True)
-
-th1 = Variable(torch.randn(nodes,7*(n-1)*2, device = device, dtype=torch.float), requires_grad = True)
-th_b1 = Variable(torch.zeros(nodes,1, device = device, dtype=torch.float), requires_grad = True)
-th2 = Variable(torch.randn(1,nodes, device = device, dtype=torch.float), requires_grad = True)
-th_b2 = Variable(torch.zeros((1,1), device = device, dtype=torch.float), requires_grad = True)
+#sys.stdout = open(sys.stdout,'w')
+#oldstdout = sys.stdout
 
 def flip_board(board_copy):
     #flips the game board and returns a new copy
@@ -69,280 +55,269 @@ def ice_hot_encoding(board):
         # if there is no player on said triangle.
         elif(k == 0):
             ice_hot[k + (i-1)*14] = 1
-            ice_hot[np.abs(k) + (i-1)*14 + 7] = 1
-    
+            ice_hot[np.abs(k) + (i-1)*14 + 7] = 1  
     return ice_hot
 
 def action(board_copy,dice,player,i, learning = False):
-    # the champion to be
-    # inputs are the board, the dice and which player is to move
-    # outputs the chosen move accordingly to its policy
     if player == -1: 
         board_copy = flip_board(board_copy)
-        
+    
+    # Get every possible move and board
+    xtheta_mean = torch.zeros((len(theta),1))
     possible_moves, possible_boards = BG.legal_moves(board_copy, dice, player = 1)
     na = len(possible_moves)
-    if na == 0:
-        va = Variable(torch.zeros((7*(n-1)*2), device = device, dtype=torch.float), requires_grad = False)
-    else:
-        va = Variable(torch.zeros((7*(n-1)*2,na), device = device, dtype=torch.float), requires_grad = False)
+    one_hot_boards = np.zeros((2*(n-1)*7,na))
     j = 0
     # if there are no moves available
     if len(possible_moves) == 0: 
         x = Variable(torch.tensor(ice_hot_encoding(board_copy), dtype = torch.float, device = device)).view(2*(n-1)*7,1)
-        va_temp=feed_forward_th(x)
-        va_temp=va_temp.softmax(dim=0)
-        va_nomove = torch.tensor([va_temp],dtype=torch.float, device = device,requires_grad=True)
-        move_index = torch.tensor([0], device = device)
+        h_sigmoid = feed_forward_th(x)
+        pi = torch.mm(theta,h_sigmoid).softmax(0)
+        xtheta_mean = h_sigmoid*pi.item()
         if learning == True:
-            #return [], torch.tensor([1],dtype=torch.float, device = device,requires_grad=True), torch.tensor([0], device = device)
-            return [],va_nomove,move_index
+            return [], xtheta_mean
         else:    
             return []
     
     for board in possible_boards:
-        # encode the board to create the input
+        # encode the board to create the input for the NN
         x = Variable(torch.tensor(ice_hot_encoding(board), dtype = torch.float, device = device)).view(2*(n-1)*7,1)
-        # now do a forward pass to evaluate the board's after-state value
-        va[:,j] = x[:,0]
+        one_hot_boards[:,j] = x[:,0]
         j+=1
-    va = feed_forward_th(va)
-    va = va.softmax(dim = -1)
-    va_temp = torch.tensor(va[0,:],dtype=torch.float, device = device,requires_grad=True)
-    #va_temp = va[0,:]
-    #move = possible_moves[np.random.randint(len(possible_moves))]
-    move_index = torch.multinomial(va_temp, num_samples  = 1)
-    move_index = Variable(move_index, requires_grad=False)
+    # select the move from a distribution
+    X=Variable(torch.tensor(one_hot_boards, dtype = torch.float,device = device))
+    h=feed_forward_th(X)
+    h_sigmoid=h.sigmoid()
+    pi = torch.mm(theta,h_sigmoid).softmax(1)
+    xtheta_mean = torch.sum(torch.mm(h_sigmoid,torch.diagflat(pi)),1)
+    xtheta_mean = torch.unsqueeze(xtheta_mean,1)
+    move_index = torch.multinomial(pi, num_samples  = 1)
     move = possible_moves[move_index]
     if player == -1: 
         move = flip_move(move)
     
     if learning == True:
-        return move, va_temp, move_index
+        return move, xtheta_mean
     
     return move
 
 # zero the gradients for the critic.
 def zero_gradients_critic():
+    w3.grad.data.zero_()
+    b3.grad.data.zero_()
     w2.grad.data.zero_()
     b2.grad.data.zero_()
     w1.grad.data.zero_()
     b1.grad.data.zero_()
-    
-# zero the gradients for the actor.
-def zero_gradients_actor():
-    th2.grad.data.zero_()
-    th_b2.grad.data.zero_()
-    th1.grad.data.zero_()
-    th_b1.grad.data.zero_()
-    
      
 # update the eligibility traces
-def update_eligibility_w(gamma, lam_w, zw1, zb1, zw2, zb2):
+def update_eligibility_w(gamma, lam_w, zw1, zb1, zw2, zb2, zw3, zb3):
+    zw3 = gamma * lam_w * zw3 + w3.grad.data
+    zb3 = gamma * lam_w * zb3 + b3.grad.data
     zw2 = gamma * lam_w * zw2 + w2.grad.data
     zb2 = gamma * lam_w * zb2 + b2.grad.data
     zw1 = gamma * lam_w * zw1 + w1.grad.data
     zb1 = gamma * lam_w * zb1 + b1.grad.data
-    return zw2, zb2, zw1, zb1
+    return zw3, zb3, zw2, zb2, zw1, zb1
 
-def update_eligibility_th(gamma, lam_w, zw1, zb1, zw2, zb2,I):
-    zw2 = gamma * lam_w * zw2 + I*th2.grad.data
-    zb2 = gamma * lam_w * zb2 + I*th_b2.grad.data
-    zw1 = gamma * lam_w * zw1 + I*th1.grad.data
-    zb1 = gamma * lam_w * zb1 + I*th_b1.grad.data
-    return zw2, zb2, zw1, zb1
-
+# feed forward for the critic's NN
 def feed_forward_w(x):
     h = torch.mm(w1,x) + b1 # matrix-multiply x with input weight w1 and add bias
     h_sigmoid = h.sigmoid() # squash this with a sigmoid function
-    y = torch.mm(w2,h_sigmoid) + b2 # multiply with the output weights w2 and add bias
+    h2 = torch.mm(w2,h_sigmoid) + b2 # multiply with the output weights w2 and add bias
+    h2_sigmoid = h2.sigmoid() # squash the output
+    y = torch.mm(w3,h2_sigmoid) + b3 # multiply with the output weights w2 and add bias
     y_sigmoid = y.sigmoid() # squash the output
-    return y_sigmoid
+    return y_sigmoid,h2_sigmoid
 
+# feed forward for the actor's NN
 def feed_forward_th(x):
-    h = torch.mm(th1,x) + th_b1 # matrix-multiply x with input weight w1 and add bias
-    h_sigmoid = h.sigmoid() # squash this with a sigmoid function
-    y = torch.mm(th2,h_sigmoid) + th_b2 # multiply with the output weights w2 and add bias
-    return y
+    h = torch.mm(w1,x) + b1 # matrix-multiply x with input weight theta_1 and add bias
+    h_sigmoid = h.sigmoid()
+    h2 = torch.mm(w2,h_sigmoid) + b2 # multiply with the output weights w2 and add bias
+    h2_sigmoid = h2.sigmoid() # squash the output
+    return h2
 
-def learnit(numgames, lam_w, lam_th, alpha, alpha1, alpha2):
+
+def learnit(numgames,lam_w,lam_th,alpha_w, alpha_th):
     gamma = 1 # for completeness
     # play numgames games for training
     for games in range(0, numgames):
         I = 1
         board = BG.init_board() # initialize the board
         player = np.random.randint(2)*2-1 # which player begins?
-    
         # now we initilize all the eligibility traces for the neural network
         Z_w1 = torch.zeros(w1.size(), device = device, dtype = torch.float)
         Z_b1 = torch.zeros(b1.size(), device = device, dtype = torch.float)
         Z_w2 = torch.zeros(w2.size(), device = device, dtype = torch.float)
         Z_b2 = torch.zeros(b2.size(), device = device, dtype = torch.float)
+        Z_w3 = torch.zeros(w3.size(), device = device, dtype = torch.float)
+        Z_b3 = torch.zeros(b3.size(), device = device, dtype = torch.float)
         
-        Z_th1 = torch.zeros(th1.size(), device = device, dtype = torch.float)
-        Z_th_b1 = torch.zeros(th_b1.size(), device = device, dtype = torch.float)
-        Z_th2 = torch.zeros(th2.size(), device = device, dtype = torch.float)
-        Z_th_b2 = torch.zeros(th_b2.size(), device = device, dtype = torch.float)
+        Z_w1_flip = torch.zeros(w1.size(), device = device, dtype = torch.float)
+        Z_b1_flip = torch.zeros(b1.size(), device = device, dtype = torch.float)
+        Z_w2_flip = torch.zeros(w2.size(), device = device, dtype = torch.float)
+        Z_b2_flip = torch.zeros(b2.size(), device = device, dtype = torch.float)
+        Z_w3_flip = torch.zeros(w3.size(), device = device, dtype = torch.float)
+        Z_b3_flip = torch.zeros(b3.size(), device = device, dtype = torch.float)
+        
         if games % 100 == 0:
             print(games)
         count = 0
-        delta2 = 0
         while not BG.game_over(board) and not BG.check_for_error(board):
             dice = BG.roll_dice()
-            
             for i in range(1+int(dice[0] == dice[1])):
-                move, va, index  = action(np.copy(board), dice, player, i, True)
-                
-                
+                #Mögulega taka mean af xtheta??
+                move, xtheta  = action(np.copy(board), dice, player, i, True)
                 if len(move) != 0:
                     for m in move:
                         board = BG.update_board(board, m, player)
-                #tvenna og vinnur i fyrri leik. BREAK
+                # if the player gets a double and wins the game in the first move. 
                 if BG.game_over(board):
                     break
                         
             if BG.game_over(board):
+                winner = player
                 break
             
             if player == -1:
                 board = flip_board(np.copy(board))
-            
             if (count > 1):
-                
-                # One-hot encoding of the board
-                x = Variable(torch.tensor(ice_hot_encoding(board), dtype = torch.float, device = device)).view(2*(n-1)*7,1)
-                
-                #Feed forward w-nn
-                target = feed_forward_w(x)
-                
-                #Feed forward old state
-                old_target = feed_forward_w(xolder)
-                
-                delta2 = 0 + gamma * target.detach().cpu().numpy() - old_target.detach().cpu().numpy() # this is the usual TD error
-                # using autograd and the contructed computational graph in pytorch compute all gradients
-                old_target.backward()
-                # update the eligibility traces using the gradients
-                delta2 =  torch.tensor(delta2, dtype = torch.float, device = device)
-                Z_w2, Z_b2, Z_w1, Z_b1 = update_eligibility_w(gamma, lam_w, Z_w1, Z_b1, Z_w2, Z_b2)
-                # zero the gradients
-            
-                zero_gradients_critic() 
-                # perform now the update for the weights
-                w1.data = w1.data + alpha1 * delta2 * Z_w1
-                b1.data = b1.data + alpha1 * delta2 * Z_b1
-                w2.data = w2.data + alpha2 * delta2 * Z_w2
-                b2.data = b2.data + alpha2 * delta2 * Z_b2
-                
-                #Update theta
-                #if len(move) != 0:
-                target_th = va[index]
-                logTarget = torch.log(target_th)
-                logTarget.backward(retain_graph=True)
+                if player == -1:
+                    #One-hot encoding of the board
+                    xflip = Variable(torch.tensor(ice_hot_encoding(board), dtype = torch.float, device = device)).view(7*(n-1)*2,1)
                     
-                # update the eligibility traces using the gradients
-                Z_th2, Z_th_b2, Z_th1, Z_th_b1 = update_eligibility_th(gamma, lam_w, Z_th1, Z_th_b1, Z_th2, Z_th_b2,I)
-                # zero the gradients
-             
-                zero_gradients_actor()    
-                th1.data = th1.data + alpha1 * delta2 * Z_th1
-                th_b1.data = th_b1.data + alpha1 * delta2 * Z_th_b1
-                th2.data = th2.data + alpha2 * delta2 * Z_th2
-                th_b2.data = th_b2.data + alpha2 * delta2 * Z_th_b2
-            
-                I = gamma*I
-            
-            if(count > 0):
-                xolder = xold
-            
-            if(not BG.game_over(board)):
-                if (count < 2):
-                    xold = Variable(torch.tensor(ice_hot_encoding(board), dtype=torch.float, device = device)).view(2*(n-1)*7,1)
+                    #Feed forward w-nn for old and new
+                    target,_= feed_forward_w(xflip)
+                    old_target,h_sigmoid = feed_forward_w(xflipold)
+                    delta = 0 + gamma * target.detach().cpu().numpy() - old_target.detach().cpu().numpy() # this is the usual TD error
+                    # using autograd and the contructed computational graph in pytorch compute all gradients
+                    old_target.backward()
+                    # update the eligibility traces using the gradients
+                    Z_w3_flip, Z_b3_flip, Z_w2_flip, Z_b2_flip, Z_w1_flip, Z_b1_flip = update_eligibility_w(gamma, lam_w, Z_w1_flip, Z_b1_flip, Z_w2_flip, Z_b2_flip, Z_w3_flip, Z_b3_flip)
+                    # zero the gradients
+                    zero_gradients_critic()
+                    # perform now the update for the weights
+                    delta =  torch.tensor(delta, dtype = torch.float, device = device)
+                    w1.data = w1.data + alpha_w * delta * Z_w1_flip
+                    b1.data = b1.data + alpha_w * delta * Z_b1_flip
+                    w2.data = w2.data + alpha_w * delta * Z_w2_flip
+                    b2.data = b2.data + alpha_w * delta * Z_b2_flip
+                    w3.data = w3.data + alpha_w * delta * Z_w3_flip
+                    b3.data = b3.data + alpha_w * delta * Z_b3_flip
+                    #Update theta
+                    grad_ln_pi = h_sigmoid - xtheta
+                    theta.data = theta.data + alpha_th*delta*grad_ln_pi.view(1,len(grad_ln_pi))
+                    xthetaflipold = xtheta
                 else:
-                    xold = x
+                    #One-hot encoding of the board
+                    x = Variable(torch.tensor(ice_hot_encoding(board), dtype = torch.float, device = device)).view(7*(n-1)*2,1)
                     
-            vaold = va
-            indexold = index
-            
+                    #Feed forward w-nn for old and new
+                    target,_= feed_forward_w(x)
+                    old_target,h_sigmoid = feed_forward_w(xold)
+                    delta = 0 + gamma * target.detach().cpu().numpy() - old_target.detach().cpu().numpy() # this is the usual TD error
+                    # using autograd and the contructed computational graph in pytorch compute all gradients
+                    old_target.backward()
+                    # update the eligibility traces using the gradients
+                    Z_w3, Z_b3, Z_w2, Z_b2, Z_w1, Z_b1 = update_eligibility_w(gamma, lam_w, Z_w1, Z_b1, Z_w2, Z_b2, Z_w3, Z_b3)
+                    # zero the gradients
+                    zero_gradients_critic()
+                    # perform now the update for the weights
+                    delta =  torch.tensor(delta, dtype = torch.float, device = device)
+                    w1.data = w1.data + alpha_w * delta * Z_w1
+                    b1.data = b1.data + alpha_w * delta * Z_b1
+                    w2.data = w2.data + alpha_w * delta * Z_w2
+                    b2.data = b2.data + alpha_w * delta * Z_b2
+                    w3.data = w3.data + alpha_w * delta * Z_w3
+                    b3.data = b3.data + alpha_w * delta * Z_b3
+                    #Update theta
+                    grad_ln_pi = h_sigmoid - xtheta
+                    theta.data = theta.data + alpha_th*delta*grad_ln_pi.view(1,len(grad_ln_pi))
+                    xthetaold = xtheta
+
+# we need to keep track of the last board state visited by the players
+            if (count < 2):
+                if player == -1:
+                    xflipold = Variable(torch.tensor(ice_hot_encoding(board), dtype=torch.float, device = device)).view(7*(n-1)*2,1)
+                else:
+                    xold = Variable(torch.tensor(ice_hot_encoding(board), dtype=torch.float, device = device)).view(7*(n-1)*2,1)
+            else:
+                if player == -1:
+                    xflipold = Variable(torch.tensor(xflip, dtype=torch.float, device = device)).view(7*(n-1)*2,1)
+                else:
+                    xold = Variable(torch.tensor(x, dtype=torch.float, device = device)).view(7*(n-1)*2,1)
+                    
             if player == -1:
                 board = flip_board(np.copy(board))
-            
             # swap players
             player = -player
             count += 1
-        # The game epsiode has ended and we know the outcome of the game, and can find the terminal rewards
-        reward = 1
-        #update fyrir winner
-        # these are basically the same updates as in the inner loop but for the final-after-states (sold and xold)        
-        # and then for the neural network:
-        win_target= feed_forward_w(xold)
+            
+        if winner==1:
+            reward = -1
+            reward_flip = 1
+            xthetaold=xtheta
+        else:
+            reward = 1
+            reward_flip = -1
+            xthetaflipold=xtheta
         
-        delta2 = reward + gamma * 0 - win_target.detach().cpu().numpy()  # this is the usual TD error
-        delta2 =  torch.tensor(delta2, dtype = torch.float, device = device)
+        #update fyrir player 1  
+        #Feed forward old state using w-NN
+        old_target, h_sigmoid = feed_forward_w(xold)
+        delta = reward + 0 - old_target.detach().cpu().numpy() # this is the usual TD error
         # using autograd and the contructed computational graph in pytorch compute all gradients
-        win_target.backward()
-        # update the eligibility traces
-        Z_w2, Z_b2, Z_w1, Z_b1 = update_eligibility_w(gamma, lam_w, Z_w1, Z_b1, Z_w2, Z_b2)
-        # zero the gradients
-        zero_gradients_critic()
-        # perform now the update of weights
-        w1.data = w1.data + alpha1 * delta2 * Z_w1
-        b1.data = b1.data + alpha1 * delta2 * Z_b1
-        w2.data = w2.data + alpha2 * delta2 * Z_w2
-        b2.data = b2.data + alpha2 * delta2 * Z_b2
-        
-        # Update theta
-        target_th = va[index]
-        logTarget = torch.log(target_th)
-        logTarget.backward()
-        
+        old_target.backward()
         # update the eligibility traces using the gradients
-        Z_th2, Z_th_b2, Z_th1, Z_th_b1 = update_eligibility_th(gamma, lam_w, Z_th1, Z_th_b1, Z_th2, Z_th_b2,I)
+        delta =  torch.tensor(delta, dtype = torch.float, device = device)
+        Z_w3, Z_b3, Z_w2, Z_b2, Z_w1, Z_b1 = update_eligibility_w(gamma, lam_w, Z_w1, Z_b1, Z_w2, Z_b2, Z_w3, Z_b3)
         # zero the gradients
-        zero_gradients_actor()
+        zero_gradients_critic() 
+        # perform the update for the weights for the critic, w
+        w1.data = w1.data + alpha_w * delta * Z_w1
+        b1.data = b1.data + alpha_w * delta * Z_b1
+        w2.data = w2.data + alpha_w * delta * Z_w2
+        b2.data = b2.data + alpha_w * delta * Z_b2
+        w3.data = w3.data + alpha_w * delta * Z_w3
+        b3.data = b3.data + alpha_w * delta * Z_b3
+
+        #Update theta
+        grad_ln_pi = h_sigmoid - xthetaold
+        theta.data = theta.data + alpha_th*delta*grad_ln_pi.view(1,len(grad_ln_pi))
         
-        th1.data = th1.data + alpha1 * delta2 * Z_th1
-        th_b1.data = th_b1.data + alpha1 * delta2 * Z_th_b1
-        th2.data = th2.data + alpha2 * delta2 * Z_th2
-        th_b2.data = th_b2.data + alpha2 * delta2 * Z_th_b2
-        
-        # update fyrir lúser
-        reward = -1
-        # these are basically the same updates as in the inner loop but for the final-after-states (sold and xold)        
+        # update fyrir flipped player    
         # and then for the neural network:
-        loser_target = feed_forward_w(x)# squash the output
-        delta2 = reward + gamma * 0 - loser_target.detach().cpu().numpy()  # this is the usual TD error
-        delta2 =  torch.tensor(delta2, dtype = torch.float, device = device)
+        #Feed forward w-NN
+
+        #Feed forward old state using w-NN
+        flip_target,h_sigmoid = feed_forward_w(xflipold)
+        delta = reward_flip + 0 - flip_target.detach().cpu().numpy() # this is the usual TD error
         # using autograd and the contructed computational graph in pytorch compute all gradients
-        loser_target.backward()
-        # update the eligibility traces
-        Z_w2, Z_b2, Z_w1, Z_b1 = update_eligibility_w(gamma, lam_w, Z_w1, Z_b1, Z_w2, Z_b2)
+        flip_target.backward()
+        # update the eligibility traces using the gradients
+        delta =  torch.tensor(delta, dtype = torch.float, device = device)
+        Z_w3_flip, Z_b3_flip, Z_w2_flip, Z_b2_flip, Z_w1_flip, Z_b1_flip = update_eligibility_w(gamma, lam_w, Z_w1_flip, Z_b1_flip, Z_w2_flip, Z_b2_flip, Z_w3_flip, Z_b3_flip)
         # zero the gradients
-        zero_gradients_critic()
-        # perform now the update of weights
-        w1.data = w1.data + alpha1 * delta2 * Z_w1
-        b1.data = b1.data + alpha1 * delta2 * Z_b1
-        w2.data = w2.data + alpha2 * delta2 * Z_w2
-        b2.data = b2.data + alpha2 * delta2 * Z_b2
+        zero_gradients_critic() 
+        # perform the update for the weights for the critic, w
+        w1.data = w1.data + alpha_w * delta * Z_w1_flip
+        b1.data = b1.data + alpha_w * delta * Z_b1_flip
+        w2.data = w2.data + alpha_w * delta * Z_w2_flip
+        b2.data = b2.data + alpha_w * delta * Z_b2_flip
+        w3.data = w3.data + alpha_w * delta * Z_w3_flip
+        b3.data = b3.data + alpha_w * delta * Z_b3_flip
+        
         
         #Update theta
-        target_th = vaold[indexold]
-        logTarget = torch.log(target_th)
-        logTarget.backward()
-        
-        # update the eligibility traces using the gradients
-        Z_th2, Z_th_b2, Z_th1, Z_th_b1 = update_eligibility_th(gamma, lam_w, Z_th1, Z_th_b1, Z_th2, Z_th_b2,I)
-        # zero the gradients
-        zero_gradients_actor()
-        
-        th1.data = th1.data + alpha1 * delta2 * Z_th1
-        th_b1.data = th_b1.data + alpha1 * delta2 * Z_th_b1
-        th2.data = th2.data + alpha2 * delta2 * Z_th2
-        th_b2.data = th_b2.data + alpha2 * delta2 * Z_th_b2
- 
+        grad_ln_pi = h_sigmoid - xthetaflipold
+        theta.data = theta.data + alpha_th*delta*grad_ln_pi.view(1,len(grad_ln_pi))
+
 
 
 def play_a_game_random(commentary = False):
     board = BG.init_board() # initialize the board
+    if commentary: BG.pretty_print(board)
     player = np.random.randint(2)*2-1 # which player begins?
     randomPlayer = -1
     while not BG.game_over(board) and not BG.check_for_error(board):
@@ -377,33 +352,69 @@ def play_a_game_random(commentary = False):
     # return the winner
     return -1*player
 
+# Global variables
+n = 29
+nodes = 100
+nodes2 = 150
+device = torch.device('cpu')
+# cuda will only create a significant speedup for large/deep networks and batched training
+#device = torch.device('cuda') 
+# randomly initialized weights, with zeros for the biases, for the critic
+w1 = Variable(torch.randn(nodes,7*(n-1)*2, device = device, dtype=torch.float), requires_grad = True)
+b1 = Variable(torch.zeros(nodes,1, device = device, dtype=torch.float), requires_grad = True)
+w2 = Variable(torch.randn(nodes2,nodes, device = device, dtype=torch.float), requires_grad = True)
+b2 = Variable(torch.zeros((nodes2,1), device = device, dtype=torch.float), requires_grad = True)
+w3 = Variable(torch.randn(1,nodes2, device = device, dtype=torch.float), requires_grad = True)
+b3 = Variable(torch.zeros((1,1), device = device, dtype=torch.float), requires_grad = True)
 
+#randomly initialized weights, with zeros for the biases, for the actor
+theta = 0.05*torch.ones((1,nodes2), device = device, dtype=torch.float)
 
-alpha= 0.1
-alpha1 = 0.12 # step sizes using for the neural network (first layer)
-alpha2 = 0.12 # (second layer)
-lam_w = 0.9 # lambda parameter in TD(lam-bda)
-lam_th = 0.9
+alpha_w = 0.05 # step sizes using for the neural network (first layer)
+alpha_th = 0.01 # (second layer)
+lam_w = 0.7 # lambda parameter in TD(lam-bda)
+lam_th = 0.7
 
-for i in range(0,5):
+# compete for "competition_games" vs a random player, 
+
+# then train for "training_steps" using self-play.
+for i in range(0,100):
     start = time.time()
     wins_for_player_1 = 0
     loss_for_player_1 = 0
-    competition_games = 500
+    competition_games = 1
     for j in range(competition_games):
         winner = play_a_game_random(commentary = False)
         if (winner == 1):
             wins_for_player_1 += 1.0
         else:
             loss_for_player_1 += 1.0
-    
+
     end = time.time()
     print(end - start)
     print(wins_for_player_1, loss_for_player_1)
     
-    training_steps = 5000
-    learnit(training_steps, lam_w,lam_th, alpha, alpha1, alpha2)
+    start = time.time()
+    training_steps = 1000
+    learnit(training_steps, lam_w,lam_th, alpha_w, alpha_th)
+    end = time.time()
+    print(end - start)
     
     
-end_final = time.time()
+'''
+Parametrar:
+0.05*torch
+alpha_w = 0.05 # step sizes using for the neural network (first layer)
+alpha_th = 0.01 # (second layer)
+lam_w = 0.7 # lambda parameter in TD(lam-bda)
+lam_th = 0.7
+Virkaði vel (Öfug reward.)
 
+
+Sama og fyrir ofan með öfug reward nema 0 í staðin fyrir -1
+Varð skelfilega lélegur.
+
+Reward rétt nema með 1 og 0.
+
+
+'''
