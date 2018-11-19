@@ -167,10 +167,6 @@ def feed_forward_th(x):
     return h
 
 
-#TO DO
-# SLEPPA AÐ UPDATE_A fyrir hitt
-# Break-a rétt?
-
 def learnit(numgames,lam_w,lam_th,alpha_w, alpha_th):
     gamma = 1 # for completeness
     # play numgames games for training
@@ -429,26 +425,4 @@ for i in range(0,100):
     torch.save(b2, './Data/Actor/b2_trained_Ab_'+str((i+1)*training_steps)+'.pth')
     torch.save(theta, './Data/Actor/theta_trained_Ab_'+str((i+1)*training_steps)+'.pth')
     
-'''
-Parametrar:
-alpha_w = 0.1
-alpha_the=0.01
-lam_w = 0.7
-theta * 0.01
-w*0.01
-    
-0.05*torch
-alpha_w = 0.05 # step sizes using for the neural network (first layer)
-alpha_th = 0.01 # (second layer)
-lam_w = 0.7 # lambda parameter in TD(lam-bda)
-lam_th = 0.7
-Virkaði vel (Öfug reward.)
 
-
-Sama og fyrir ofan með öfug reward nema 0 í staðin fyrir -1
-Varð skelfilega lélegur.
-
-Reward rétt nema með 1 og 0.
-
-
-'''
